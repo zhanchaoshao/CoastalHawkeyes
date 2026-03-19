@@ -1,72 +1,37 @@
-import json
-
-# Existing imports
-import streamlit as st
-import ee
-import geemap
-import geopandas as gpd
-import rasterio
-from rasterio.merge import merge
-from rasterio.mask import mask
-from rasterio.enums import Resampling
-from joblib import dump, load
-import pandas as pd
-import numpy as np
 import os
-import folium
-from folium.plugins import Draw
-import streamlit.components.v1 as components
-import certifi
+import json
 import base64
-from sklearn.ensemble import RandomForestClassifier
+import certifi
+import numpy as np
+import pandas as pd
+import streamlit as st
+import folium
+import geopandas as gpd
+import ee
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
-import googleapiclient.errors
+import streamlit.components.v1 as components
 
-# Apply the certifi CA bundle to urllib
-os.environ['SSL_CERT_FILE'] = certifi.where()
+from folium.plugins import Draw
 
-# Function to authenticate and initialize Google Earth Engine
-def authenticate_gee():
-    ee.Authenticate()
-    ee.Initialize(project="coral-style-410300")
+# =========================================================
+# ENV / SSL
+# =========================================================
+os.environ["SSL_CERT_FILE"] = certifi.where()
 
-# Function to authenticate Google Drive using OAuth 2.0
-def authenticate_google_drive():
-    SCOPES = ['https://www.googleapis.com/auth/drive']
-    CLIENT_SECRETS_FILE = 'C:/Users/Svaa064/PycharmProjects/pythonProject1/client_secret_742644021504-lgvo0pqvb3opltca2dcfm04id67rk3mb.apps.googleusercontent.com.json'  # Update with your path
-
-    # Create the flow using the client secrets file from the Google API Console.
-    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, SCOPES)
-    credentials = flow.run_local_server(port=0)
-
-    # Save the credentials for the session
-    st.session_state['credentials'] = credentials
-
-    drive_service = googleapiclient.discovery.build('drive', 'v3', credentials=credentials)
-    st.session_state['drive_service'] = drive_service
-    return drive_service
-
-
-
-# Function to check if the user is authenticated
-def check_authentication():
-    return 'credentials' in st.session_state
-
-# Set the page configuration to wide layout
+# =========================================================
+# STREAMLIT CONFIG
+# =========================================================
 st.set_page_config(layout="wide")
 
-# Use HTML and CSS to style the sidebar title
 st.sidebar.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap'); /* Import cursive font */
-
+    @import url('https://fonts.googleapis.com/css2?family=Great+Vibes&display=swap');
     .sidebar-title {
-        font-size: 64px; /* Double the original size */
-        font-family: 'Great Vibes', cursive; /* Apply cursive font */
-        font-weight: 700; /* Adjust weight if necessary */
+        font-size: 64px;
+        font-family: 'Great Vibes', cursive;
+        font-weight: 700;
     }
     </style>
     <h1 class="sidebar-title">Coastal Hawkeye</h1>
@@ -74,127 +39,117 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
-# Function to convert DN to reflectance
-def convert_dn_to_reflectance(dn, satellite, date):
-    if satellite == 'Sentinel-2':
-        ref_date = pd.Timestamp('2022-01-25')
-        if date < ref_date:
-            return dn / 10000
-        else:
-            return (dn - 1000) / 10000
-    elif satellite == 'Landsat 8':
-        return dn / 10000
+# =========================================================
+# SESSION STATE INIT
+# =========================================================
+if "image_list" not in st.session_state:
+    st.session_state["image_list"] = []
+if "drive_service" not in st.session_state:
+    st.session_state["drive_service"] = None
+if "credentials" not in st.session_state:
+    st.session_state["credentials"] = None
+if "geojson_path" not in st.session_state:
+    st.session_state["geojson_path"] = None
 
-# Function to reproject an image to EPSG:4326
-def reproject_to_epsg4326(src_path, dst_path):
-    with rasterio.open(src_path) as src:
-        transform, width, height = calculate_default_transform(
-            src.crs, 'EPSG:4326', src.width, src.height, *src.bounds)
-        kwargs = src.meta.copy()
-        kwargs.update({
-            'crs': 'EPSG:4326',
-            'transform': transform,
-            'width': width,
-            'height': height
-        })
+# =========================================================
+# AUTH: GOOGLE EARTH ENGINE
+# =========================================================
+def authenticate_gee():
+    """
+    Earth Engine Authentication.
+    """
+    try:
+        ee.Initialize(project="coral-style-410300")
+        st.success("✅ Earth Engine already initialized.")
+    except Exception:
+        ee.Authenticate()
+        ee.Initialize(project="coral-style-410300")
+        st.success("✅ Earth Engine authenticated and initialized.")
 
-        with rasterio.open(dst_path, 'w', **kwargs) as dst:
-            for i in range(1, src.count + 1):
-                reproject(
-                    source=rasterio.band(src, i),
-                    destination=rasterio.band(dst, i),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs='EPSG:4326',
-                    resampling=Resampling.nearest)
-    return dst_path
+# =========================================================
+# AUTH: GOOGLE DRIVE
+# =========================================================
+def authenticate_google_drive():
+    """
+    Google Drive OAuth (local).
+    """
+    SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# Function to add GEE image to folium map with RGB bands
-def add_gee_image_to_map(image, m, bands=['B4', 'B3', 'B2']):
-    url = image.getThumbURL({'min': 0, 'max': 3000, 'bands': bands, 'dimensions': '512x512'})
-    bounds = image.geometry().bounds().getInfo()['coordinates'][0]
+    CLIENT_SECRETS_FILE = r"C:/Users/zsha641/PycharmProjects/pythonProject/client_secret_742644021504-9ofiuialamam9m9rufe5tuupursnqas2.apps.googleusercontent.com.json"
+    # 👉 change this path to your real json file
+
+    flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, SCOPES
+    )
+    credentials = flow.run_local_server(port=0)
+
+    drive_service = googleapiclient.discovery.build(
+        "drive", "v3", credentials=credentials
+    )
+
+    st.session_state["credentials"] = credentials
+    st.session_state["drive_service"] = drive_service
+    return drive_service
+
+# =========================================================
+# ROI: ALWAYS RETURN EXPORTABLE GEOMETRY
+# =========================================================
+def make_roi_geometry(location_method, point=None, polygon=None, buffer_m=2000):
+    """
+    Always return an ee.Geometry polygon/rectangle suitable for export.
+    - Lat/Lon: buffer point then bounds() -> rectangle
+    - GeoJSON: polygon.bounds()
+    """
+    if location_method == "Lat, Lon":
+        if point is None:
+            raise ValueError("Point ROI missing.")
+        roi_geom = point.buffer(buffer_m).bounds()
+        return roi_geom
+
+    if location_method == "Upload GeoJSON":
+        if polygon is None:
+            raise ValueError("Polygon ROI missing.")
+        roi_geom = polygon.bounds()
+        return roi_geom
+
+    raise ValueError("Unknown ROI method.")
+
+# =========================================================
+# MAP HELPERS
+# =========================================================
+def add_geojson_to_map(geojson_path, m):
+    gdf = gpd.read_file(geojson_path)
+    folium.GeoJson(gdf).add_to(m)
+    return m
+
+def add_gee_image_to_map(image, m, bands=["B4", "B3", "B2"]):
+    """
+    Add thumbnail overlay of GEE image.
+    (visualization only)
+    """
+    url = image.getThumbURL({
+        "min": 0,
+        "max": 3000,
+        "bands": bands,
+        "dimensions": "512x512"
+    })
+
+    bounds = image.geometry().bounds().getInfo()["coordinates"][0]
     img = folium.raster_layers.ImageOverlay(
         name="GEE Image",
         image=url,
         bounds=[[bounds[1][1], bounds[0][0]], [bounds[3][1], bounds[2][0]]],
-        opacity=1,
+        opacity=1.0,
         interactive=True,
         cross_origin=False,
-        zindex=1,
-        tiles='cartodbpositron'
+        zindex=1
     )
     img.add_to(m)
     folium.LayerControl().add_to(m)
     return m
 
-# Function to display thumbnails and return selected image IDs
-def display_thumbnails(images):
-    selected_image_ids = []
-    for i, (image_id, thumb_url) in enumerate(images):
-        st.image(thumb_url, caption=f"Image ID: {image_id}", use_column_width=True)
-        if st.checkbox(f"Select Image {i + 1}", key=f"select_{image_id}"):
-            selected_image_ids.append(image_id)
-    return selected_image_ids
-
-# New function to export bands of an image to GeoTIFF and save to Google Drive
-def export_bands_to_drive(image, bands, region, folder):
-    tasks = []
-    for band in bands:
-        band_image = image.select(band)
-        band_image_clip = band_image.clipToCollection(region)
-        date = image.date().format('YYYY-MM-dd').getInfo()
-        export_name = f"{date}_{band}.tif"
-        task = ee.batch.Export.image.toDrive(**{
-            'image': band_image_clip,
-            'description': export_name,
-            'folder': folder,
-            'scale': 10,
-            'region': region.geometry()
-        })
-        task.start()
-        tasks.append(task)
-    return tasks
-
-# Function to combine bands into a single GeoTIFF (still useful for local processing after downloading from Drive)
-def combine_bands(image_paths, output_path):
-    src_files_to_mosaic = []
-    for path in image_paths:
-        st.write(f"Opening {path} for merging")
-        src = rasterio.open(path)
-        src_files_to_mosaic.append(src)
-
-    mosaic, out_trans = merge(src_files_to_mosaic)
-    out_meta = src_files_to_mosaic[0].meta.copy()
-    out_meta.update({"driver": "GTiff",
-                     "height": mosaic.shape[1],
-                     "width": mosaic.shape[2],
-                     "transform": out_trans,
-                     "count": mosaic.shape[0]})
-
-    with rasterio.open(output_path, "w", **out_meta) as dest:
-        dest.write(mosaic)
-    st.write(f"Combined image saved to {output_path}")
-
-# Function to create a download link for a file
-def create_download_link(file_path):
-    with open(file_path, "rb") as file:
-        b64 = base64.b64encode(file.read()).decode()
-    href = f'<a href="data:file/tif;base64,{b64}" download="{os.path.basename(file_path)}">Download {os.path.basename(file_path)}</a>'
-    return href
-
-# Function to add a GeoJSON to a folium map
-def add_geojson_to_map(geojson, m):
-    gdf = gpd.read_file(geojson)
-    folium.GeoJson(gdf).add_to(m)
-    return m
-
-# Create the folium map centered on New Zealand
-m = folium.Map(location=[-40.9006, 174.8860], zoom_start=5, scrollWheelZoom=False, tiles='cartodbpositron')
-
-# Streamlit function to display a folium map
 def folium_static(m):
-    st.subheader("Imagery visualization")
+    st.subheader("🗺️ Imagery visualization")
     map_html = m._repr_html_()
     components.html(
         f"""
@@ -202,300 +157,333 @@ def folium_static(m):
             {map_html}
         </div>
         """,
-        width=800,
-        height=600
+        height=650
     )
 
-# Initialize session state for storing image list and GeoJSON path
-if 'image_list' not in st.session_state:
-    st.session_state['image_list'] = []
-if 'drive_service' not in st.session_state:
-    st.session_state['drive_service'] = None
-if 'geojson_path' not in st.session_state:
-    st.session_state['geojson_path'] = None
+# =========================================================
+# THUMBNAILS UI
+# =========================================================
+def display_thumbnails(images):
+    selected_image_ids = []
+    for i, (image_id, thumb_url) in enumerate(images):
+        st.image(thumb_url, caption=f"Image ID: {image_id}", use_container_width=True)
+        if st.checkbox(f"Select Image {i+1}", key=f"select_{image_id}"):
+            selected_image_ids.append(image_id)
+    return selected_image_ids
 
-# Add a logo to the sidebar
+# =========================================================
+# EXPORT: FIXED VERSION (NO .geometry() BUG)
+# =========================================================
+def export_bands_to_drive(image, bands, roi_geom, folder, scale=10, crs=None):
+    """
+    Export each band as a GeoTIFF to Google Drive.
+    roi_geom must be ee.Geometry (polygon/rectangle).
+    """
+    tasks = []
+    date = image.date().format("YYYY-MM-dd").getInfo()
+
+    for band in bands:
+        band_img = image.select(band).clip(roi_geom)
+        export_name = f"{date}_{band}"
+
+        params = {
+            "image": band_img,
+            "description": export_name,
+            "folder": folder,
+            "fileNamePrefix": export_name,
+            "scale": scale,
+            "region": roi_geom,   # ✅ correct
+            "maxPixels": 1e13
+        }
+        if crs:
+            params["crs"] = crs
+
+        task = ee.batch.Export.image.toDrive(**params)
+        task.start()
+        tasks.append(task)
+
+    return tasks
+
+# =========================================================
+# MAIN MAP
+# =========================================================
+m = folium.Map(
+    location=[-40.9006, 174.8860],
+    zoom_start=5,
+    scrollWheelZoom=False,
+    tiles="cartodbpositron"
+)
+
+# =========================================================
+# SIDEBAR UI
+# =========================================================
 with st.sidebar:
     st.image(
         "https://www.waikato.ac.nz/assets/Uploads/Research/Research-institutes-centres-and-groups/Institutes/eri-logo.jpg",
-        width=250)  # Replace with the URL of your logo
+        width=250
+    )
+
     st.header("Export Satellite Image from Google Earth Engine")
 
-    with st.expander("Authentication"):
-
+    # -----------------------------
+    # AUTH
+    # -----------------------------
+    with st.expander("🔐 Authentication", expanded=True):
         if st.button("Authenticate with Google Drive"):
-            authenticate_google_drive()
-            st.success("Authenticated with Google Drive.")
+            try:
+                authenticate_google_drive()
+                st.success("✅ Authenticated with Google Drive.")
+            except Exception as e:
+                st.error(f"Google Drive authentication failed: {e}")
 
         if st.button("Authenticate with Google Earth Engine"):
-            authenticate_gee()
-            st.success("Authenticated with Google Earth Engine.")
+            try:
+                authenticate_gee()
+            except Exception as e:
+                st.error(f"Earth Engine authentication failed: {e}")
 
-    with st.expander("Imagery Search"):
-        satellite = st.selectbox("Select Satellite", ["Sentinel-2", "Landsat 8"])
+    # -----------------------------
+    # SEARCH SETTINGS
+    # -----------------------------
+    with st.expander("🔎 Imagery Search", expanded=True):
+        satellite = st.selectbox("Select Satellite", ["Sentinel-2"])
+        # (keep only Sentinel-2 for now, because your bands are B2 B3 B4 B8)
+
         start_date = st.date_input("Start Date")
         end_date = st.date_input("End Date")
 
         location_method = st.radio("Define ROI", ["Lat, Lon", "Upload GeoJSON"])
 
+        point = None
+        polygon = None
+
         if location_method == "Lat, Lon":
-            location = st.text_input("Location (Lat, Lon)")
+            location = st.text_input("Location (Lat, Lon) e.g. -36.85, 174.76")
+            roi_buffer_m = st.slider("ROI half-size around point (meters)", 100, 20000, 2000, step=100)
+
             if location:
                 try:
                     lat, lon = map(str.strip, location.split(","))
                     lat = float(lat)
                     lon = float(lon)
                     point = ee.Geometry.Point([lon, lat])
-                    st.success(f"Location set to Latitude: {lat}, Longitude: {lon}")
-                except ValueError:
-                    st.error("Please enter valid latitude and longitude values separated by a comma.")
+                    st.success(f"✅ Location set: lat={lat}, lon={lon}")
                 except Exception as e:
-                    st.error(f"An unexpected error occurred: {e}")
+                    st.error(f"Invalid Lat/Lon: {e}")
 
-        elif location_method == "Upload GeoJSON":
+        else:
             geojson_file = st.file_uploader("Upload GeoJSON file", type=["geojson"])
             if geojson_file:
+                os.makedirs("temp", exist_ok=True)
                 geojson_path = os.path.join("temp", geojson_file.name)
+
                 with open(geojson_path, "wb") as f:
                     f.write(geojson_file.getbuffer())
 
-                gdf = gpd.read_file(geojson_path)
-                if gdf.empty:
-                    st.error("The uploaded GeoJSON file is empty. Please upload a valid file.")
-                else:
-                    if gdf.geometry.iloc[0].geom_type == 'Polygon':
-                        coords = gdf.geometry.iloc[0].__geo_interface__["coordinates"]
-                        polygon = ee.Geometry.Polygon(coords)
-                    elif gdf.geometry.iloc[0].geom_type == 'MultiPolygon':
-                        coords = gdf.geometry.iloc[0].__geo_interface__["coordinates"][0]
-                        polygon = ee.Geometry.Polygon(coords)
+                try:
+                    gdf = gpd.read_file(geojson_path)
+                    if gdf.empty:
+                        st.error("Uploaded GeoJSON is empty.")
                     else:
-                        st.error(
-                            "Unsupported geometry type. Please upload a GeoJSON with Polygon or MultiPolygon geometry.")
-                        polygon = None
+                        geom_type = gdf.geometry.iloc[0].geom_type
 
-                    if polygon:
-                        st.session_state['geojson_path'] = geojson_path
-                        m = add_geojson_to_map(geojson_path, m)
-                        st.success("GeoJSON uploaded and displayed on the map.")
+                        if geom_type == "Polygon":
+                            coords = gdf.geometry.iloc[0].__geo_interface__["coordinates"]
+                            polygon = ee.Geometry.Polygon(coords)
+                        elif geom_type == "MultiPolygon":
+                            coords = gdf.geometry.iloc[0].__geo_interface__["coordinates"][0]
+                            polygon = ee.Geometry.Polygon(coords)
+                        else:
+                            polygon = None
+                            st.error("Unsupported geometry type. Must be Polygon or MultiPolygon.")
+
+                        if polygon:
+                            st.session_state["geojson_path"] = geojson_path
+                            m = add_geojson_to_map(geojson_path, m)
+                            st.success("✅ GeoJSON loaded and displayed.")
+
+                except Exception as e:
+                    st.error(f"Failed to read GeoJSON: {e}")
 
         cloud_coverage = st.slider("Max Cloud Coverage (%)", 0, 100, 10)
 
+        selected_bands = st.multiselect(
+            "Select Bands (Sentinel-2)",
+            ["B2", "B3", "B4", "B8"],
+            default=["B2", "B3", "B4", "B8"]
+        )
+        resolution = st.slider("Export Resolution (meters)", 10, 1000, 10)
+
+        # -----------------------------
+        # FETCH DATA
+        # -----------------------------
         if st.button("Fetch Data"):
-            if location_method == "Lat, Lon" and location:
-                collection = (
-                    ee.ImageCollection(
-                        'COPERNICUS/S2' if satellite == 'Sentinel-2' else 'LANDSAT/LE07/C02/T1_L2')
-                    .filterBounds(point)
-                    .filterDate(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-                    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_coverage))
-            elif location_method == "Upload GeoJSON" and geojson_file:
-                collection = (
-                    ee.ImageCollection(
-                        'COPERNICUS/S2' if satellite == 'Sentinel-2' else 'LANDSAT/LE07/C02/T1_L2')
-                    .filterBounds(polygon)
-                    .filterDate(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-                    .filterMetadata('CLOUDY_PIXEL_PERCENTAGE', 'less_than', cloud_coverage))
+            if satellite == "Sentinel-2":
+                collection_id = "COPERNICUS/S2"
             else:
-                collection = None
+                collection_id = "COPERNICUS/S2"
 
-            if collection:
-                images = collection.toList(collection.size()).getInfo()
-                if not images:
-                    st.error("No image found for the specified parameters.")
+            try:
+                if location_method == "Lat, Lon":
+                    if point is None:
+                        st.error("Please provide a valid Lat/Lon.")
+                    else:
+                        roi_geom = make_roi_geometry("Lat, Lon", point=point, buffer_m=roi_buffer_m)
+                        collection = (
+                            ee.ImageCollection(collection_id)
+                            .filterBounds(roi_geom)
+                            .filterDate(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                            .filterMetadata("CLOUDY_PIXEL_PERCENTAGE", "less_than", cloud_coverage)
+                        )
+
                 else:
-                    st.session_state['image_list'] = []
-                    for image_info in images:
-                        image_id = image_info['id']
-                        image = ee.Image(image_id)
-                        thumb_url = image.getThumbURL(
-                            {'min': 0, 'max': 3000, 'bands': ['B4', 'B3', 'B2'], 'dimensions': '256x256'})
-                        st.session_state['image_list'].append((image_id, thumb_url))
+                    if polygon is None:
+                        st.error("Please upload a valid GeoJSON polygon.")
+                    else:
+                        roi_geom = make_roi_geometry("Upload GeoJSON", polygon=polygon)
+                        collection = (
+                            ee.ImageCollection(collection_id)
+                            .filterBounds(roi_geom)
+                            .filterDate(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+                            .filterMetadata("CLOUDY_PIXEL_PERCENTAGE", "less_than", cloud_coverage)
+                        )
 
-        # Display thumbnails if there are any
-        if st.session_state['image_list']:
-            selected_image_ids = display_thumbnails(st.session_state['image_list'])
+                if "collection" in locals():
+                    images = collection.toList(collection.size()).getInfo()
+
+                    if not images:
+                        st.error("No image found for the specified parameters.")
+                        st.session_state["image_list"] = []
+                    else:
+                        st.session_state["image_list"] = []
+                        for image_info in images:
+                            image_id = image_info["id"]
+                            image = ee.Image(image_id)
+                            thumb_url = image.getThumbURL({
+                                "min": 0,
+                                "max": 3000,
+                                "bands": ["B4", "B3", "B2"],
+                                "dimensions": "256x256"
+                            })
+                            st.session_state["image_list"].append((image_id, thumb_url))
+
+                        st.success(f"✅ Found {len(st.session_state['image_list'])} images.")
+
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+
+        # -----------------------------
+        # SHOW THUMBNAILS + EXPORT
+        # -----------------------------
+        if st.session_state["image_list"]:
+            st.markdown("---")
+            st.subheader("✅ Select images to display/export")
+
+            selected_image_ids = display_thumbnails(st.session_state["image_list"])
+
+            # Add selected images on map
             for image_id in selected_image_ids:
-                image = ee.Image(image_id)
-                m = add_gee_image_to_map(image, m)
-            st.success("Selected images added to the map.")
+                img = ee.Image(image_id)
+                m = add_gee_image_to_map(img, m)
 
-            selected_bands = st.multiselect("Select Bands", ['B2', 'B3', 'B4', 'B8'],
-                                            default=['B2', 'B3', 'B4', 'B8'],
-                                            key='bands_select')
-            resolution = st.slider("Select Resolution (meters)", 10, 1000, 30, key='resolution_slider')
-            if 'drive_service' in st.session_state and st.session_state['drive_service']:
-                export_directory = st.text_input("Enter Google Drive folder name", key='export_directory')
-                if st.button("Export Selected Images", key='export_button'):
+            if selected_image_ids:
+                st.success("Selected images added to the map.")
+
+            # Drive export
+            if st.session_state["drive_service"] is None:
+                st.warning("Authenticate with Google Drive before exporting.")
+            else:
+                export_directory = st.text_input("Google Drive folder name", value="GEE_exports")
+
+                if st.button("Export Selected Images"):
                     if not selected_image_ids:
                         st.error("No images selected.")
-                    elif not export_directory:
-                        st.error("Please specify a Google Drive folder name.")
                     else:
-                        export_tasks = []
-                        for image_id in selected_image_ids:
-                            image = ee.Image(image_id)
-                            region = ee.FeatureCollection(json.loads(open(st.session_state['geojson_path']).read())['features']) if location_method == "Upload GeoJSON" else point
-                            tasks = export_bands_to_drive(image, selected_bands, region, export_directory)
-                            export_tasks.extend(tasks)
+                        try:
+                            # build ROI geometry (polygon / rectangle)
+                            if location_method == "Lat, Lon":
+                                roi_geom = make_roi_geometry("Lat, Lon", point=point, buffer_m=roi_buffer_m)
+                            else:
+                                roi_geom = make_roi_geometry("Upload GeoJSON", polygon=polygon)
 
-                        if export_tasks:
+                            export_tasks = []
+                            for image_id in selected_image_ids:
+                                img = ee.Image(image_id)
+                                tasks = export_bands_to_drive(
+                                    img,
+                                    selected_bands,
+                                    roi_geom,
+                                    export_directory,
+                                    scale=resolution
+                                )
+                                export_tasks.extend(tasks)
+
                             st.success(
-                                f"Export tasks created. Check your Google Drive folder '{export_directory}' for the exported images.")
-                        else:
-                            st.error("No images were successfully exported.")
-            else:
-                st.error("Please authenticate with Google Drive.")
+                                f"✅ Export tasks submitted! Check Google Drive folder: '{export_directory}'."
+                            )
+                            st.info("Note: Earth Engine export can take a few minutes.")
 
+                        except Exception as e:
+                            st.error(f"Export failed: {e}")
+
+# =========================================================
+# SHOW MAP
+# =========================================================
 folium_static(m)
 
 
+# =========================================================
+# COMPOSITE BANDS (UPLOAD) + OPTIONAL REFLECTANCE CORRECTION
+# =========================================================
+# Drop this whole block into your app (replace your current upload/correction/composite part)
+# Requires: pandas as pd, numpy as np, rasterio, streamlit as st, os
+# Requires your reproject_raster() function (or use the one below)
 
-
-
-
-# Apply the certifi CA bundle to urllib
-os.environ['SSL_CERT_FILE'] = certifi.where()
-
-
-# Function to convert DN to reflectance
-def convert_dn_to_reflectance(dn, date):
-    ref_date = pd.Timestamp('2022-01-31').date()
-    if date < ref_date:
-        return dn / 10000
-    else:
-        return (dn - 1000) / 10000
-
-
-# Function to create a download link for a file
-def create_download_link(file_path):
-    with open(file_path, "rb") as file:
-        b64 = base64.b64encode(file.read()).decode()
-    href = f'<a href="data:file/tif;base64,{b64}" download="{os.path.basename(file_path)}">Download {os.path.basename(file_path)}</a>'
-    return href
-
-
-# Function to combine bands into a single GeoTIFF
-def combine_bands(image_paths, output_path):
-    band_data = []
-    for path in image_paths:
-        with rasterio.open(path) as src:
-            band_data.append(src.read(1))
-
-    out_meta = rasterio.open(image_paths[0]).meta.copy()
-    out_meta.update({"driver": "GTiff",
-                     "height": band_data[0].shape[0],
-                     "width": band_data[0].shape[1],
-                     "count": len(band_data)})
-
-    with rasterio.open(output_path, "w", **out_meta) as dest:
-        for i, band in enumerate(band_data, start=1):
-            dest.write(band, i)
-    return output_path
-
-
-# Function to reproject the raster to the desired coordinate system
-def reproject_raster(src_path, dst_path, dst_crs='EPSG:4326'):
-    with rasterio.open(src_path) as src:
-        transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds)
-        kwargs = src.meta.copy()
-        kwargs.update({
-            'crs': dst_crs,
-            'transform': transform,
-            'width': width,
-            'height': height
-        })
-
-        with rasterio.open(dst_path, 'w', **kwargs) as dst:
-            for i in range(1, src.count + 1):
-                reproject(
-                    source=rasterio.band(src, i),
-                    destination=rasterio.band(dst, i),
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    resampling=Resampling.nearest)
-    return dst_path
-
-
-# Function to get the bounds of a raster file
-def get_raster_bounds(raster_path):
-    with rasterio.open(raster_path) as src:
-        bounds = src.bounds
-    return bounds
-
-
-# Function to display raster on folium map with selected bands for RGB
-def display_raster_on_map(raster_path, rgb_bands):
-    with rasterio.open(raster_path) as src:
-        bounds = src.bounds
-        image = src.read(rgb_bands)
-        image = (image - image.min()) / (image.max() - image.min())  # Normalize the image
-
-    m = folium.Map([(bounds.top + bounds.bottom) / 2, (bounds.left + bounds.right) / 2], zoom_start=12)
-    folium.raster_layers.ImageOverlay(
-        name='Raster Image',
-        image=image.transpose(1, 2, 0),
-        bounds=[[bounds.bottom, bounds.left], [bounds.top, bounds.right]],
-        opacity=0.6,
-        interactive=True,
-        cross_origin=False,
-        zindex=1,
-        tiles='cartodbpositron'
-    ).add_to(m)
-    folium.LayerControl().add_to(m)
-    return m
-
-
-# Initialize session state for storing uploaded files
-if 'uploaded_files' not in st.session_state:
-    st.session_state['uploaded_files'] = {'B2': None, 'B3': None, 'B4': None, 'B8': None}
-
-import streamlit as st
 import os
+import numpy as np
+import pandas as pd
 import rasterio
-from rasterio.merge import merge
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from datetime import datetime
+import streamlit as st
 
-# Function to convert DN to reflectance
-def convert_dn_to_reflectance(dn, date):
-    ref_date = pd.Timestamp('2022-01-31').date()
+# ---------- helpers ----------
+def convert_dn_to_reflectance(dn: np.ndarray, date) -> np.ndarray:
+    """
+    Convert Sentinel-2 L2A DN to reflectance.
+    date: python date (from st.date_input)
+    """
+    ref_date = pd.Timestamp("2022-01-31").date()
+    dn = dn.astype("float32")
+
     if date < ref_date:
-        return dn / 10000
+        refl = dn / 10000.0
     else:
-        return (dn - 1000) / 10000
+        refl = (dn - 1000.0) / 10000.0
 
-def combine_bands(band_paths, output_path):
-    # Combine bands into a single multi-band raster
-    with rasterio.open(band_paths[0]) as src:
-        meta = src.meta
+    # Optional: mask invalid values
+    refl[refl < 0] = np.nan
+    # If you want to cap extreme values, uncomment:
+    # refl[refl > 1] = np.nan
 
-    meta.update(count=len(band_paths))
-
-    with rasterio.open(output_path, 'w', **meta) as dst:
-        for idx, band_path in enumerate(band_paths, start=1):
-            with rasterio.open(band_path) as src:
-                dst.write_band(idx, src.read(1))
-
-    return output_path
+    return refl.astype("float32")
 
 
-def reproject_raster(src_path, dst_path, dst_crs):
+def reproject_raster(src_path: str, dst_path: str, dst_crs: str = "EPSG:4326"):
     with rasterio.open(src_path) as src:
         transform, width, height = calculate_default_transform(
-            src.crs, dst_crs, src.width, src.height, *src.bounds)
+            src.crs, dst_crs, src.width, src.height, *src.bounds
+        )
         kwargs = src.meta.copy()
-        kwargs.update({
-            'crs': dst_crs,
-            'transform': transform,
-            'width': width,
-            'height': height
-        })
+        kwargs.update(
+            {
+                "crs": dst_crs,
+                "transform": transform,
+                "width": width,
+                "height": height,
+            }
+        )
 
-        with rasterio.open(dst_path, 'w', **kwargs) as dst:
+        with rasterio.open(dst_path, "w", **kwargs) as dst:
             for i in range(1, src.count + 1):
                 reproject(
                     source=rasterio.band(src, i),
@@ -504,75 +492,127 @@ def reproject_raster(src_path, dst_path, dst_crs):
                     src_crs=src.crs,
                     dst_transform=transform,
                     dst_crs=dst_crs,
-                    resampling=Resampling.nearest)
-
-
-# Initialize session state if it doesn't exist
-if 'uploaded_files' not in st.session_state:
-    st.session_state['uploaded_files'] = {}
-
-# Sidebar for image upload
-with st.sidebar:
-    with st.expander("Composite Bands"):
-        uploaded_file_b2 = st.file_uploader("Upload Band 2 (B2)", type=["tif"], key='upload_b2')
-        if uploaded_file_b2:
-            st.session_state['uploaded_files']['B2'] = uploaded_file_b2
-
-        uploaded_file_b3 = st.file_uploader("Upload Band 3 (B3)", type=["tif"], key='upload_b3')
-        if uploaded_file_b3:
-            st.session_state['uploaded_files']['B3'] = uploaded_file_b3
-
-        uploaded_file_b4 = st.file_uploader("Upload Band 4 (B4)", type=["tif"], key='upload_b4')
-        if uploaded_file_b4:
-            st.session_state['uploaded_files']['B4'] = uploaded_file_b4
-
-        uploaded_file_b8 = st.file_uploader("Upload Band 8 (B8)", type=["tif"], key='upload_b8')
-        if uploaded_file_b8:
-            st.session_state['uploaded_files']['B8'] = uploaded_file_b8
-
-    if all(st.session_state['uploaded_files'].values()):
-        st.success("All bands uploaded successfully.")
-
-        with st.expander("Reflectance Correction"):
-            need_correction = st.checkbox("Do you need reflectance correction?", value=True)
-
-            corrected_bands = {}
-            if need_correction:
-                date = st.date_input("Scanning Date")
-                if st.button("Apply Reflectance Correction"):
-                    os.makedirs("temp", exist_ok=True)
-                    for band_key, uploaded_file in st.session_state['uploaded_files'].items():
-                        file_path = os.path.join("temp", uploaded_file.name)
-                        with open(file_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-
-                        with rasterio.open(file_path) as src:
-                            profile = src.profile
-                            dn = src.read(1)
-                            reflectance = convert_dn_to_reflectance(dn, date)
-                            corrected_band_path = os.path.join("temp", f"corrected_{uploaded_file.name}")
-                            with rasterio.open(corrected_band_path, 'w', **profile) as dst:
-                                dst.write(reflectance, 1)
-                            corrected_bands[band_key] = corrected_band_path
-
-                    st.success("Reflectance correction applied.")
-                else:
-                    corrected_bands = {band_key: os.path.join("temp", uploaded_file.name) for band_key, uploaded_file in
-                                       st.session_state['uploaded_files'].items()}
-            else:
-                corrected_bands = {band_key: os.path.join("temp", uploaded_file.name) for band_key, uploaded_file in
-                                   st.session_state['uploaded_files'].items()}
-
-        with st.expander("Composite Bands and Export"):
-            output_path = st.text_input("Enter the output path for the composited image", "temp/composited.tif")
-            dst_crs = st.selectbox("Select the coordinate system for the composited image", ["EPSG:32760", "EPSG:4326"],
-                                   index=1)
-            if st.button("Save Composited Images"):
-                combined_image_path = combine_bands(
-                    [corrected_bands['B2'], corrected_bands['B3'], corrected_bands['B4'], corrected_bands['B8']],
-                    output_path
+                    resampling=Resampling.nearest,
                 )
-                st.success("Composited image saved and reprojected successfully.")
+
+
+def combine_bands_float32(band_paths, output_path):
+    """
+    Make a 4-band float32 GeoTIFF from single-band inputs.
+    """
+    with rasterio.open(band_paths[0]) as src0:
+        meta = src0.meta.copy()
+
+    meta.update(count=len(band_paths), dtype="float32")
+
+    with rasterio.open(output_path, "w", **meta) as dst:
+        for idx, p in enumerate(band_paths, start=1):
+            with rasterio.open(p) as src:
+                arr = src.read(1).astype("float32")
+                dst.write(arr, idx)
+
+    return output_path
+
+
+# ---------- session state ----------
+if "uploaded_files" not in st.session_state:
+    st.session_state["uploaded_files"] = {"B2": None, "B3": None, "B4": None, "B8": None}
+
+# This is the important one: final band paths to use for compositing
+if "band_paths" not in st.session_state:
+    st.session_state["band_paths"] = {}
+
+os.makedirs("temp", exist_ok=True)
+
+# ---------- UI ----------
+with st.sidebar:
+    with st.expander("Composite Bands (Upload)", expanded=True):
+        up_b2 = st.file_uploader("Upload Sentinel-2 B2 (Blue)", type=["tif", "tiff"], key="upload_b2")
+        if up_b2: st.session_state["uploaded_files"]["B2"] = up_b2
+
+        up_b3 = st.file_uploader("Upload Sentinel-2 B3 (Green)", type=["tif", "tiff"], key="upload_b3")
+        if up_b3: st.session_state["uploaded_files"]["B3"] = up_b3
+
+        up_b4 = st.file_uploader("Upload Sentinel-2 B4 (Red)", type=["tif", "tiff"], key="upload_b4")
+        if up_b4: st.session_state["uploaded_files"]["B4"] = up_b4
+
+        up_b8 = st.file_uploader("Upload Sentinel-2 B8 (NIR)", type=["tif", "tiff"], key="upload_b8")
+        if up_b8: st.session_state["uploaded_files"]["B8"] = up_b8
+
+        all_uploaded = all(st.session_state["uploaded_files"].values())
+        if all_uploaded:
+            st.success("All 4 bands uploaded.")
+
+    if all(st.session_state["uploaded_files"].values()):
+
+        with st.expander("Reflectance Correction", expanded=True):
+            need_correction = st.checkbox("Apply reflectance correction?", value=True, key="need_corr")
+            scan_date = st.date_input("Scanning Date", key="scan_date")
+
+            if st.button("Apply / Update Band Paths", key="apply_corr_paths"):
+                band_paths = {}
+
+                for band_key, uploaded_file in st.session_state["uploaded_files"].items():
+                    raw_path = os.path.join("temp", uploaded_file.name)
+                    with open(raw_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+
+                    if need_correction:
+                        with rasterio.open(raw_path) as src:
+                            dn = src.read(1)
+                            profile = src.profile.copy()
+
+                        refl = convert_dn_to_reflectance(dn, scan_date)
+
+                        profile.update(dtype="float32", count=1, nodata=None)
+
+                        corrected_path = os.path.join("temp", f"refl_{band_key}_{uploaded_file.name}")
+                        with rasterio.open(corrected_path, "w", **profile) as dst:
+                            dst.write(refl.astype("float32"), 1)
+
+                        band_paths[band_key] = corrected_path
+                    else:
+                        band_paths[band_key] = raw_path
+
+                st.session_state["band_paths"] = band_paths
+                st.success("Band paths are ready for compositing (corrected if selected).")
+
+                # Optional quick check
+                b2p = st.session_state["band_paths"]["B2"]
+                with rasterio.open(b2p) as src:
+                    arr = src.read(1)
+                st.caption(f"Quick check B2: min={np.nanmin(arr):.4f}, max={np.nanmax(arr):.4f} (NaNs ignored)")
+
+        with st.expander("Composite Bands and Export", expanded=True):
+            out_path = st.text_input("Output composite path", "temp/composited_reflectance.tif", key="out_comp_path")
+
+            do_reproject = st.checkbox("Reproject composite?", value=False, key="do_reproj")
+            dst_crs = st.selectbox("Destination CRS", ["EPSG:32760", "EPSG:4326"], index=1, key="dst_crs_sel")
+
+            if st.button("Save Composited Image", key="save_composite"):
+                if not st.session_state["band_paths"]:
+                    st.error("Click 'Apply / Update Band Paths' first (even if correction is OFF).")
+                else:
+                    bp = st.session_state["band_paths"]
+                    ordered = [bp["B2"], bp["B3"], bp["B4"], bp["B8"]]
+
+                    combined_path = combine_bands_float32(ordered, out_path)
+
+                    final_path = combined_path
+                    if do_reproject:
+                        reproj_path = os.path.splitext(out_path)[0] + f"_{dst_crs.replace(':','')}.tif"
+                        reproject_raster(combined_path, reproj_path, dst_crs)
+                        final_path = reproj_path
+
+                    st.success(f"✅ Composite saved: {final_path}")
+
+                    # Optional: show basic stats for each band
+                    with rasterio.open(final_path) as src:
+                        stats = []
+                        for i in range(1, src.count + 1):
+                            a = src.read(i).astype("float32")
+                            stats.append((i, float(np.nanmin(a)), float(np.nanmax(a))))
+                    st.write("Band stats (min/max):", stats)
 
 
 
@@ -813,7 +853,7 @@ import geopandas as gpd
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.features import rasterize
-from scipy.ndimage import label, generate_binary_structure
+from scipy.ndimage import label, generate_binary_structure, distance_transform_edt
 from skimage.measure import regionprops
 from sklearn.svm import SVR
 from sklearn.impute import SimpleImputer
@@ -925,6 +965,90 @@ def sieve_classification_map(classification_map, min_size=100):
     sieved_map = classification_map.copy()
     sieved_map[~sieve_mask] = 0
     return sieved_map
+
+def save_uploaded_reference_vector(uploaded_reference_files, base_dir="temp/reference_mangrove"):
+    os.makedirs(base_dir, exist_ok=True)
+
+    if not isinstance(uploaded_reference_files, list):
+        uploaded_reference_files = [uploaded_reference_files]
+
+    saved_paths = []
+    for uploaded_file in uploaded_reference_files:
+        save_path = os.path.join(base_dir, uploaded_file.name)
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        saved_paths.append(save_path)
+
+    primary_candidates = [p for p in saved_paths if p.lower().endswith(".gpkg") or p.lower().endswith(".geojson") or p.lower().endswith(".shp")]
+    if not primary_candidates:
+        raise ValueError("No readable reference vector found. Upload a GeoJSON, GPKG, or full shapefile set.")
+
+    return primary_candidates[0]
+
+
+def get_pixel_size_m(transform, crs, height, width):
+    px_w = abs(transform.a)
+    px_h = abs(transform.e)
+
+    if crs is not None and getattr(crs, "is_projected", False):
+        return float((px_w + px_h) / 2.0)
+
+    center_lat = transform.f + transform.e * (height / 2.0)
+    meters_per_deg_lat = 111320.0
+    meters_per_deg_lon = 111320.0 * np.cos(np.deg2rad(center_lat))
+    px_w_m = px_w * meters_per_deg_lon
+    px_h_m = px_h * meters_per_deg_lat
+    return float((abs(px_w_m) + abs(px_h_m)) / 2.0)
+
+
+def filter_class_by_reference_distance(classification_map, reference_vector_path, transform, crs,
+                                       target_class_value=1, max_distance_m=200):
+    ref_gdf = gpd.read_file(reference_vector_path)
+    if ref_gdf.empty:
+        raise ValueError("Reference mangrove layer is empty.")
+
+    ref_gdf = ref_gdf[ref_gdf.geometry.notnull()].copy()
+    if ref_gdf.empty:
+        raise ValueError("Reference mangrove layer has no valid geometry.")
+
+    if crs is not None:
+        ref_gdf = ref_gdf.to_crs(crs)
+
+    ref_mask = rasterize(
+        [(geom, 1) for geom in ref_gdf.geometry],
+        out_shape=classification_map.shape,
+        transform=transform,
+        fill=0,
+        dtype="uint8"
+    ).astype(bool)
+
+    if not np.any(ref_mask):
+        raise ValueError("Reference mangrove layer does not overlap the classified TIFF extent.")
+
+    pixel_size_m = get_pixel_size_m(transform, crs, classification_map.shape[0], classification_map.shape[1])
+    distance_pixels = distance_transform_edt(~ref_mask)
+    distance_m = distance_pixels * pixel_size_m
+
+    filtered_map = classification_map.copy()
+    target_mask = filtered_map == target_class_value
+    remove_mask = target_mask & (distance_m > max_distance_m)
+    filtered_map[remove_mask] = 0
+
+    return filtered_map, int(np.sum(remove_mask))
+
+
+def export_single_band_tif(array, output_path, transform, crs, profile, nodata_value=0):
+    profile = profile.copy()
+    profile.update(
+        dtype=rasterio.uint8,
+        count=1,
+        compress='lzw',
+        transform=transform,
+        crs=crs,
+        nodata=nodata_value
+    )
+    with rasterio.open(output_path, 'w', **profile) as dst:
+        dst.write(array.astype(rasterio.uint8), 1)
 
 
 # Function to rasterize vector data
@@ -1077,9 +1201,9 @@ def evaluate_model(model, scaler, X_test, y_test):
 if __name__ == "__main__":
     st.title("Machine Learning Model Training")
 
-    st.sidebar.header("Supervised Classification and Density Estimation")
-    ml_operation = st.sidebar.selectbox("Select operation",
-                                        ["Landcover Detection", "Seagrass Density Estimation",
+    st.sidebar.header("Analysis Tools")
+    ml_operation = st.sidebar.selectbox("Select tool",
+                                        ["Mangrove Reference Filter", "Landcover Detection", "Seagrass Density Estimation",
                                          "Seagrass Migration Pattern (to be established)"])
 
     if ml_operation == "Landcover Detection":
@@ -1127,7 +1251,7 @@ if __name__ == "__main__":
                     prediction_map[combined_image[:, :, 0] == nodata] = 0
 
                 sieved_map = sieve_classification_map(prediction_map, min_size=100)
-
+                final_map = sieved_map.copy()
 
                 def export_classification_map(prediction_map, output_path, transform, crs, profile):
                     profile.update(
@@ -1142,7 +1266,7 @@ if __name__ == "__main__":
                         dst.write(prediction_map.astype(rasterio.uint8), 1)
 
 
-                export_classification_map(sieved_map, output_path, transform, crs, profile)
+                export_classification_map(final_map, output_path, transform, crs, profile)
                 st.sidebar.success(f"Classification map exported successfully to {output_path}")
 
                 reprojected_tif = reproject_tif_to_epsg4326(output_path, "reprojected_classification_map.tif")
@@ -1160,7 +1284,7 @@ if __name__ == "__main__":
                 m = display_raster_on_map(reprojected_tif, labels, colors)
                 folium_static(m, width=800, height=600)
 
-                unique, counts = np.unique(sieved_map, return_counts=True)
+                unique, counts = np.unique(final_map, return_counts=True)
                 area_per_class = dict(zip(unique, counts))
 
                 pixel_area_m2 = 10 * 10
@@ -1277,6 +1401,102 @@ if __name__ == "__main__":
                         st.write(report_df)
 
                         save_model_download_link(model)
+
+    elif ml_operation == "Mangrove Reference Filter":
+        st.subheader("Mangrove Reference Filter")
+        st.write("This is a standalone post-processing tool. Upload any classified TIFF plus a reference mangrove distribution, then remove mangrove pixels that are farther than the chosen maximum distance from the reference layer.")
+
+        uploaded_classified_tif = st.file_uploader(
+            "Upload classified TIFF",
+            type=["tif", "tiff"],
+            key="upload_classified_tif_for_reference_filter"
+        )
+        target_class_value = st.number_input(
+            "Mangrove class value in the classified TIFF",
+            min_value=0,
+            max_value=255,
+            value=1,
+            step=1,
+            key="sidebar_mangrove_class_value_filter"
+        )
+        max_distance_m = st.number_input(
+            "Maximum distance from reference mangroves (m)",
+            min_value=1,
+            max_value=5000,
+            value=200,
+            step=10,
+            key="sidebar_mangrove_max_distance_filter"
+        )
+        filtered_output_path = st.text_input(
+            "Output path for filtered classified TIFF",
+            value="temp/classified_mangrove_filtered.tif",
+            key="sidebar_filtered_output_path"
+        )
+        uploaded_reference_files = st.file_uploader(
+            "Upload reference mangrove distribution (GeoJSON, GPKG, or full shapefile set)",
+            type=["geojson", "gpkg", "shp", "shx", "dbf", "prj", "cpg"],
+            accept_multiple_files=True,
+            key="sidebar_reference_mangrove_upload"
+        )
+
+        if st.button("Apply Mangrove Reference Filter", key="apply_sidebar_mangrove_reference_filter"):
+            if uploaded_classified_tif is None:
+                st.error("Please upload the classified TIFF.")
+            elif not uploaded_reference_files:
+                st.error("Please upload the reference mangrove layer.")
+            elif not filtered_output_path:
+                st.error("Please provide an output path for the filtered TIFF.")
+            else:
+                try:
+                    os.makedirs("temp", exist_ok=True)
+                    os.makedirs(os.path.dirname(filtered_output_path) or ".", exist_ok=True)
+
+                    classified_tif_path = os.path.join("temp", uploaded_classified_tif.name)
+                    with open(classified_tif_path, "wb") as f:
+                        f.write(uploaded_classified_tif.getbuffer())
+
+                    reference_vector_path = save_uploaded_reference_vector(uploaded_reference_files)
+
+                    with rasterio.open(classified_tif_path) as src:
+                        classification_map = src.read(1)
+                        transform = src.transform
+                        crs = src.crs
+                        profile = src.profile
+
+                    filtered_map, removed_pixel_count = filter_class_by_reference_distance(
+                        classification_map,
+                        reference_vector_path,
+                        transform,
+                        crs,
+                        target_class_value=int(target_class_value),
+                        max_distance_m=float(max_distance_m)
+                    )
+
+                    export_single_band_tif(filtered_map, filtered_output_path, transform, crs, profile, nodata_value=0)
+                    st.success(
+                        f"Filtered TIFF exported successfully to {filtered_output_path}. Removed {removed_pixel_count} mangrove pixels beyond {max_distance_m} m from the reference mangrove layer."
+                    )
+
+                    reprojected_tif = reproject_tif_to_epsg4326(filtered_output_path, "temp/reprojected_mangrove_reference_filtered.tif")
+                    labels = [f"Class {i}" for i in range(1, 13)]
+                    colors = [
+                        "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF",
+                        "#00FFFF", "#800000", "#008000", "#000080", "#808000",
+                        "#800080", "#008080"
+                    ]
+                    m = display_raster_on_map(reprojected_tif, labels, colors)
+                    folium_static(m, width=800, height=600)
+
+                    unique, counts = np.unique(filtered_map, return_counts=True)
+                    area_df = pd.DataFrame({
+                        'Class Value': unique,
+                        'Area (pixels)': counts,
+                        'Area (m²)': counts * abs(transform.a * transform.e)
+                    })
+                    st.dataframe(area_df)
+
+                except Exception as e:
+                    st.error(f"Mangrove reference filter failed: {e}")
 
     elif ml_operation == "Seagrass Density Estimation":
         st.subheader("Seagrass Density Estimation")
